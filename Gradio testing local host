@@ -1,0 +1,97 @@
+import os
+import cv2
+import gradio as gr
+from ultralytics import YOLO
+import imageio_ffmpeg as ffmpeg
+import subprocess
+
+# 1. Load your trained model weights
+model_path = r"C:\Users\risha\OneDrive\Desktop\ML FFB trial\runs\detect\train-9\weights\best.pt"
+model = YOLO(model_path)
+
+def predict_video(video_path):
+    if video_path is None:
+        return None
+        
+    cap = cv2.VideoCapture(video_path)
+    width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps    = int(cap.get(cv2.CAP_PROP_FPS))
+    
+    # Save a temporary file using basic MP4V first
+    temp_output = "temp_raw_output.mp4"
+    final_output = "playable_output.mp4"
+    
+    # Clean up any lingering video files from previous clicks
+    for f in [temp_output, final_output]:
+        if os.path.exists(f):
+            try: os.remove(f)
+            except: pass
+
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(temp_output, fourcc, fps, (width, height))
+    
+    print("Processing video frames on GPU...")
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+            
+        results = model.predict(source=frame, conf=0.25, device=0, verbose=False)
+        annotated_frame = results[0].plot()
+        out.write(annotated_frame)
+        
+    cap.release()
+    out.release()
+    print("Frames processed! Optimizing container for browser playback...")
+    
+    # --- The Complete Web-Playable Fix via FFmpeg ---
+    # This calls your local ffmpeg binary to forcefully transcode the raw stream 
+    # into a clean, streaming-friendly H.264 video with an AAC audio profile.
+    ffmpeg_exe = ffmpeg.get_ffmpeg_exe()
+    cmd = [
+        ffmpeg_exe, "-y",
+        "-i", temp_output,
+        "-vcodec", "libx264",
+        "-pix_fmt", "yuv420p",
+        "-profile:v", "baseline",
+        "-level", "3.0",
+        final_output
+    ]
+    
+    # Execute the transformation quietly in the background
+    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    print("Video conversion complete!")
+    
+    return final_output
+
+# --- Image Inference Function ---
+def predict_image(img):
+    if img is None:
+        return None
+    results = model.predict(source=img, conf=0.25, device=0)
+    annotated_img = results[0].plot()
+    return cv2.cvtColor(annotated_img, cv2.COLOR_BGR2RGB)
+
+# --- Build the Local Gradio Web Interface ---
+with gr.Blocks(theme=gr.themes.Soft()) as demo:
+    gr.Markdown("# 🌴 Oil Palm FFB Object Detection Dashboard")
+    
+    with gr.Tab("Video Testing"):
+        gr.Markdown("### 📹 Drop your raw plantation video here")
+        with gr.Row():
+            video_input = gr.Video(sources=["upload"], label="Upload/Drop Raw Field Video Clip")
+            video_output = gr.Video(label="Processed Tracking Output Video")
+        video_button = gr.Button("Process Full Video Feed", variant="primary")
+        video_button.click(predict_video, inputs=video_input, outputs=video_output)
+        
+    with gr.Tab("Image Testing"):
+        gr.Markdown("### 📷 Drop your raw canopy image here")
+        with gr.Row():
+            image_input = gr.Image(type="numpy", label="Upload Raw Field Image")
+            image_output = gr.Image(type="numpy", label="YOLO Model Prediction Target")
+        image_button = gr.Button("Analyze Image", variant="primary")
+        image_button.click(predict_image, inputs=image_input, outputs=image_output)
+
+# Automatically scans and boots up on the next available open port
+demo.launch(server_name="127.0.0.1", share=False)
