@@ -1,0 +1,13 @@
+from ultralytics import YOLO
+
+# 1. Load the pre-trained YOLOv11 nano model
+model = YOLO("yolo11n.pt") 
+
+# 2. Run the training loop on your NVIDIA GPU
+results = model.train(
+    data=r"C:\Users\risha\OneDrive\Desktop\ML FFB trial\FFB Dataset\data.yaml",
+    epochs=50,       # 50 full passes through your video dataset
+    imgsz=640,       # Standard input frame resolution
+    batch=16,        # Squeezes comfortably into your GTX 980's VRAM
+    device=0         # 0 tells PyTorch to use your first NVIDIA GPU
+)
