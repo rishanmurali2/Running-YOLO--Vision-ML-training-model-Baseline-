@@ -1,0 +1,97 @@
+import speech_recognition as sr
+import sounddevice as sd
+from scipy.io.wavfile import write
+from gtts import gTTS
+import pygame
+import os
+
+# =====================================================================
+# CONFIGURATION
+# =====================================================================
+# Device 26 is your verified Windows WASAPI DroidCam channel
+TARGET_MIC = 2  
+
+# =====================================================================
+# 1. Initialize the "Mouth" (PC Speakers via Google TTS)
+# =====================================================================
+print("Initializing AI Voice Engine...")
+pygame.mixer.init()
+
+def ai_speak(text):
+    print(f"\n🤖 AI Replies: {text}")
+    try:
+        # Generate the audio file from text
+        tts = gTTS(text=text, lang='en', slow=False)
+        temp_audio = "ai_reply.mp3"
+        tts.save(temp_audio)
+        
+        # Play the audio over PC speakers
+        pygame.mixer.music.load(temp_audio)
+        pygame.mixer.music.play()
+        
+        # Wait for the audio to finish playing
+        while pygame.mixer.music.get_busy():
+            pygame.time.Clock().tick(10)
+            
+        # Clean up the temporary file
+        pygame.mixer.music.unload()
+        if os.path.exists(temp_audio):
+            os.remove(temp_audio)
+    except Exception as e:
+        print(f"(Audio Playback Error: {e})")
+
+# =====================================================================
+# 2. Initialize the "Ears" (Microphone)
+# =====================================================================
+recognizer = sr.Recognizer()
+
+print("\n=========================================================")
+print("[SUCCESS] Conversational Lab Active!")
+ai_speak("System online. I am ready to listen.")
+print("=========================================================")
+
+while True:
+    user_trigger = input("\nPress [ENTER] to speak, or type 'q' to quit: ")
+    if user_trigger.lower() == 'q':
+        break
+
+    print("[🎤 Recording...] Speak into your iPhone now! (Listening for 4 seconds)")
+
+    try:
+        # Capture 4 seconds of audio using your exact working Device ID
+        fs = 16000
+        duration = 4 
+        audio_array = sd.rec(int(duration * fs), samplerate=fs, channels=1, dtype='int16', device=TARGET_MIC)
+        sd.wait() # Block execution until the 4 seconds are up
+        
+        # Save and process the audio
+        temp_file = 'chat_temp.wav'
+        write(temp_file, fs, audio_array)
+        
+        with sr.AudioFile(temp_file) as source:
+            audio_data = recognizer.record(source)
+            user_text = recognizer.recognize_google(audio_data).lower()
+            
+        print(f"👤 You Said: '{user_text}'")
+        
+        # =====================================================================
+        # 3. The "Brain" (Logic Block)
+        # =====================================================================
+        if "hear me" in user_text:
+            ai_speak("Yes, I can hear you perfectly! The hardware loop is working.")
+        elif "hello" in user_text:
+            ai_speak("Hello there! The audio pipeline is fully operational.")
+        else:
+            # Echoes back whatever you said if it doesn't match the commands above
+            ai_speak(f"I heard you say: {user_text}")
+            
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
+            
+    except sr.UnknownValueError:
+        ai_speak("I couldn't quite catch that. Could you try speaking a bit louder?")
+    except Exception as e:
+        print(f"Hardware processing error: {e}")
+
+pygame.mixer.quit()
+print("Voice Lab Closed.")
