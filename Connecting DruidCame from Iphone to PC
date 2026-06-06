@@ -1,0 +1,45 @@
+import cv2
+
+# =====================================================================
+# CONFIGURATION - Make sure your phone's DroidCam app is open and awake!
+# =====================================================================
+PHONE_IP = "192.168.0.243"  # Your verified phone IP
+PORT = "4747"                # Standard DroidCam port
+
+# We changed '/mjpegfeed' to '/video' to fix the silent network packet drop
+stream_url = f"http://{PHONE_IP}:{PORT}/video"
+# If the window is blank, uncomment the line below to try the fallback route instead:
+# stream_url = f"http://{PHONE_IP}:{PORT}/video?640x480"
+
+# =====================================================================
+# STREAM INITIALIZATION
+# =====================================================================
+print(f"Connecting to phone camera stream via: {stream_url}")
+cap = cv2.VideoCapture(stream_url)
+
+if not cap.isOpened():
+    print("\n[ERROR] Could not sync with DroidCam stream.")
+    print("Checklist to fix:")
+    print("1. Is the DroidCam app wide open on your phone screen right now?")
+    print("2. Is your phone screen unlocked?")
+    print("3. Are both your PC and Phone connected to the exact same Wi-Fi?")
+    exit()
+
+print("\n[SUCCESS] Connection stable! Press 'q' on your keyboard to close the window.")
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        print("[WARNING] Dropped frame or stream paused. Check if your phone went to sleep.")
+        break
+
+    # Open the video panel on your PC monitor
+    cv2.imshow("DroidCam Dataset Stream Tool", frame)
+
+    # Watch for the 'q' exit key
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
+print("Stream closed cleanly.")
