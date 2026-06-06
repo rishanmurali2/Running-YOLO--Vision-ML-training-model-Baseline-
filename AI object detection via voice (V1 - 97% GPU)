@@ -1,0 +1,219 @@
+import cv2
+import torch
+import speech_recognition as sr
+import sounddevice as sd
+from scipy.io.wavfile import write
+import numpy as np
+from gtts import gTTS
+import pygame
+import os
+import queue
+import threading
+import time
+from transformers import Owlv2Processor, Owlv2ForObjectDetection
+
+# =====================================================================
+# CONFIGURATION & HARDWARE
+# =====================================================================
+TARGET_MIC = 26  # Your working Windows WASAPI DroidCam channel
+
+try:
+    device_info = sd.query_devices(TARGET_MIC, 'input')
+    fs = int(device_info['default_samplerate'])
+except Exception:
+    fs = 44100 
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+# =====================================================================
+# THE CAMERA BUFFER THREAD (The secret to zero lag)
+# =====================================================================
+class CameraStream:
+    def __init__(self, src=0):
+        self.stream = cv2.VideoCapture(src)
+        self.ret, self.frame = self.stream.read()
+        self.stopped = False
+
+    def start(self):
+        threading.Thread(target=self.update, daemon=True).start()
+        return self
+
+    def update(self):
+        while not self.stopped:
+            self.ret, self.frame = self.stream.read()
+
+    def read(self):
+        return self.ret, self.frame
+
+    def stop(self):
+        self.stopped = True
+        self.stream.release()
+
+# =====================================================================
+# 1. Initialize the "Mouth"
+# =====================================================================
+print("Initializing AI Voice Engine...")
+pygame.mixer.init()
+
+def ai_speak(text):
+    print(f"\n🤖 AI: {text}")
+    try:
+        tts = gTTS(text=text, lang='en', slow=False)
+        temp_audio = "ai_reply.mp3"
+        tts.save(temp_audio)
+        pygame.mixer.music.load(temp_audio)
+        pygame.mixer.music.play()
+        while pygame.mixer.music.get_busy():
+            pygame.time.Clock().tick(10)
+        pygame.mixer.music.unload()
+        if os.path.exists(temp_audio):
+            os.remove(temp_audio)
+    except Exception:
+        pass
+
+# =====================================================================
+# 2. Initialize the "Brain & Eyes"
+# =====================================================================
+print(f"Initializing Open-World Vision Brain on [{device.upper()}]...")
+processor = Owlv2Processor.from_pretrained("google/owlv2-base-patch16-ensemble")
+model = Owlv2ForObjectDetection.from_pretrained("google/owlv2-base-patch16-ensemble").to(device)
+
+recognizer = sr.Recognizer()
+
+# Start the dedicated, high-speed camera thread
+cam_stream = CameraStream(0).start()
+time.sleep(1.0) # Give the camera a second to warm up
+
+# --- STATE VARIABLES ---
+target_label = None
+is_recording = False
+audio_queue = queue.Queue()
+audio_stream = None
+
+latest_frame = None
+tracked_boxes = [] 
+
+# =====================================================================
+# THE BACKGROUND AI THREAD
+# =====================================================================
+def vision_worker():
+    global latest_frame, tracked_boxes, target_label
+    
+    while True:
+        if target_label and latest_frame is not None:
+            frame_to_analyze = latest_frame.copy()
+            
+            inputs = processor(text=[[target_label]], images=frame_to_analyze, return_tensors="pt").to(device)
+            with torch.no_grad():
+                outputs = model(**inputs)
+            
+            target_sizes = torch.Tensor([frame_to_analyze.shape[:2]]).to(device)
+            
+            try:
+                results = processor.image_processor.post_process_object_detection(outputs, target_sizes=target_sizes, threshold=0.1)
+            except AttributeError:
+                results = processor.post_process_grounded_object_detection(outputs, target_sizes=target_sizes, threshold=0.1)
+            
+            new_boxes = []
+            for box, score, label in zip(results[0]["boxes"], results[0]["scores"], results[0]["labels"]):
+                if score > 0.15: 
+                    new_boxes.append((box.tolist(), score.item()))
+            
+            tracked_boxes = new_boxes
+            time.sleep(0.01) 
+        else:
+            time.sleep(0.05)
+
+vision_thread = threading.Thread(target=vision_worker, daemon=True)
+vision_thread.start()
+
+print("\n=========================================================")
+print("[SUCCESS] Ultimate 3-Thread Architecture Active!")
+ai_speak("All systems online. Video feed is fully decoupled.")
+print("=========================================================")
+
+def audio_callback(indata, frames, time_info, status):
+    audio_queue.put(indata.copy())
+
+# =====================================================================
+# MAIN DISPLAY LOOP (Buttery Smooth & Time-Debounced)
+# =====================================================================
+last_space_time = 0
+
+while True:
+    # Instantly grab the newest frame from memory
+    ret, frame = cam_stream.read()
+    if not ret or frame is None:
+        continue
+        
+    latest_frame = frame.copy()
+
+    if target_label:
+        for box, score in tracked_boxes:
+            xmin, ymin, xmax, ymax = map(int, box)
+            cv2.rectangle(frame, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
+            cv2.putText(frame, f"{target_label} ({score:.2f})", (xmin, ymin - 10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+    cv2.imshow("Full AI Robot Lab", frame)
+    key = cv2.waitKey(1) & 0xFF
+    
+    # --- PUSH-TO-TALK LOGIC (Time-Based) ---
+    if key == ord(' '): 
+        last_space_time = time.time() # Reset clock while holding
+        
+        if not is_recording:
+            is_recording = True
+            audio_queue.queue.clear()
+            audio_stream = sd.InputStream(samplerate=fs, channels=1, dtype='int16', device=TARGET_MIC, callback=audio_callback)
+            audio_stream.start()
+            print("\n[🎤] Recording... (Keep holding Spacebar)")
+            
+    elif is_recording:
+        # If 0.5 seconds pass without holding space, process audio
+        if time.time() - last_space_time > 0.5: 
+            is_recording = False
+            audio_stream.stop()
+            audio_stream.close()
+            print("\n[⏸️] Recording Stopped! Analyzing request...")
+            
+            audio_data = []
+            while not audio_queue.empty():
+                audio_data.append(audio_queue.get())
+                
+            if len(audio_data) > 0:
+                audio_array = np.concatenate(audio_data, axis=0)
+                temp_file = 'chat_temp.wav'
+                write(temp_file, fs, audio_array)
+                
+                try:
+                    with sr.AudioFile(temp_file) as source:
+                        audio_record = recognizer.record(source)
+                        user_text = recognizer.recognize_google(audio_record).lower()
+                        print(f"👤 You Said: '{user_text}'")
+                        
+                        if "this is" in user_text:
+                            new_label = user_text.split("this is")[-1].strip()
+                            new_label = new_label.replace("a ", "").replace("an ", "").replace(".", "")
+                            
+                            tracked_boxes = []
+                            target_label = new_label
+                            ai_speak(f"Got it. Looking for the {target_label}.")
+                            
+                        elif "stop tracking" in user_text or "clear" in user_text:
+                            target_label = None
+                            tracked_boxes = []
+                            ai_speak("Tracking cleared.")
+                            
+                except sr.UnknownValueError:
+                    ai_speak("I couldn't quite catch that. Hold the spacebar clearly while speaking.")
+                    
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+
+    if key == ord('q'):
+        break
+
+cam_stream.stop()
+cv2.destroyAllWindows()
+pygame.mixer.quit()
